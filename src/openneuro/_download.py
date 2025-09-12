@@ -648,6 +648,43 @@ def _get_local_tag(*, dataset_id: str, dataset_dir: Path) -> str | None:
     return local_version
 
 
+def _skip_directory(root: str, dir_path: str, include: Iterable[str]) -> bool:
+    """Traverse a directory and check if it matches the include pattern."""
+    if include:
+        # Take the example:
+        #
+        # --include="sub-CON001/*.eeg"
+        #
+        # or
+        #
+        # --include="sub-CON001"
+        #
+        # or
+        #
+        # --include="sub-CON001/*"
+        #
+        # All three of these should traverse `sub-CON001` and its
+        # subdirectories.
+        n_parts = len(PurePosixPath(root).parts)
+        dir_include = [PurePosixPath(inc) for inc in include]
+        dir_include = (
+            [  # for stuff like sub-CON001/*
+                "/".join(inc.parts[:n_parts] + ("*",))
+                for inc in dir_include
+                if len(inc.parts) >= n_parts
+            ]
+            + [  # and stuff like sub-CON001/*.eeg
+                "/".join(inc.parts[: n_parts - 1] + ("*",))
+                for inc in dir_include
+                if len(inc.parts) >= n_parts - 1 and len(inc.parts) > 1
+            ]
+        )  # we want to traverse sub-CON001 in both cases
+        matches_include, _ = _match_include_exclude(
+            dir_path, include=dir_include, exclude=[]
+        )
+    return dir_include and not any(matches_include)
+
+
 def _unicode(msg: str, *, emoji: str = " ", end: str = "…") -> str:
     if stdout_unicode:
         msg = f"{emoji} {msg} {end}"
@@ -680,38 +717,8 @@ def _iterate_filenames(
     for directory in directories:
         # Only bother with directories that are in the include list
         if include:
-            # Take the example:
-            #
-            # --include="sub-CON001/*.eeg"
-            #
-            # or
-            #
-            # --include="sub-CON001"
-            #
-            # or
-            #
-            # --include="sub-CON001/*"
-            #
-            # All three of these should traverse `sub-CON001` and its
-            # subdirectories.
-            n_parts = len(PurePosixPath(root).parts)
-            dir_include = [PurePosixPath(inc) for inc in include]
-            dir_include = (
-                [  # for stuff like sub-CON001/*
-                    "/".join(inc.parts[:n_parts] + ("*",))
-                    for inc in dir_include
-                    if len(inc.parts) >= n_parts
-                ]
-                + [  # and stuff like sub-CON001/*.eeg
-                    "/".join(inc.parts[: n_parts - 1] + ("*",))
-                    for inc in dir_include
-                    if len(inc.parts) >= n_parts - 1 and len(inc.parts) > 1
-                ]
-            )  # we want to traverse sub-CON001 in both cases
-            matches_include, _ = _match_include_exclude(
-                directory["filename"], include=dir_include, exclude=[]
-            )
-            if dir_include and not any(matches_include):
+            dir_path = directory["filename"]
+            if _skip_directory(root, dir_path, include):
                 continue
         # Query filenames
         this_dir = directory["filename"]
@@ -917,34 +924,38 @@ def download(
                     "Please check your includes."
                 )
 
+    for file in files:
+        print(file["filename"])
+
+
     msg = (
         f"Retrieving up to {len(files)} files "
         f"({max_concurrent_downloads} concurrent downloads)."
     )
     tqdm.write(_unicode(msg, emoji="📥", end=""))
 
-    query_str = snapshot_query_template.safe_substitute(
-        tag=tag or "null",
-        dataset_id=dataset,
-    )
-    coroutine = _download_files(
-        target_dir=target_dir,
-        files=files,
-        verify_hash=verify_hash,
-        verify_size=verify_size,
-        max_retries=max_retries,
-        retry_backoff=retry_backoff,
-        max_concurrent_downloads=max_concurrent_downloads,
-        query_str=query_str,
-    )
+    # query_str = snapshot_query_template.safe_substitute(
+    #     tag=tag or "null",
+    #     dataset_id=dataset,
+    # )
+    # coroutine = _download_files(
+    #     target_dir=target_dir,
+    #     files=files,
+    #     verify_hash=verify_hash,
+    #     verify_size=verify_size,
+    #     max_retries=max_retries,
+    #     retry_backoff=retry_backoff,
+    #     max_concurrent_downloads=max_concurrent_downloads,
+    #     query_str=query_str,
+    # )
 
-    # Try to re-use event loop if it already exists. This is required e.g.
-    # for use in Jupyter notebooks.
-    try:
-        loop = asyncio.get_running_loop()
-        loop.create_task(coroutine)
-    except RuntimeError:
-        asyncio.run(coroutine)
+    # # Try to re-use event loop if it already exists. This is required e.g.
+    # # for use in Jupyter notebooks.
+    # try:
+    #     loop = asyncio.get_running_loop()
+    #     loop.create_task(coroutine)
+    # except RuntimeError:
+    #     asyncio.run(coroutine)
 
-    tqdm.write(_unicode(f"Finished downloading {dataset}.\n", emoji="✅", end=""))
-    tqdm.write(_unicode("Please enjoy your brains.\n", emoji="🧠", end=""))
+    # tqdm.write(_unicode(f"Finished downloading {dataset}.\n", emoji="✅", end=""))
+    # tqdm.write(_unicode("Please enjoy your brains.\n", emoji="🧠", end=""))
