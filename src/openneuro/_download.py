@@ -893,8 +893,12 @@ def download(
         ):
             files.append(file)
             # Keep track of include matches.
+            matches_to_include = [inc for inc in include if fnmatch.fnmatch(filename, inc)]
             if filename in include:
                 include_counts[include.index(filename)] += 1
+            elif matches_to_include:
+                for match in matches_to_include:
+                    include_counts[include.index(match)] += 1
             continue
 
         matches_keep, matches_exclude = _match_include_exclude(
@@ -924,38 +928,34 @@ def download(
                     "Please check your includes."
                 )
 
-    for file in files:
-        print(file["filename"])
-
-
     msg = (
         f"Retrieving up to {len(files)} files "
         f"({max_concurrent_downloads} concurrent downloads)."
     )
     tqdm.write(_unicode(msg, emoji="📥", end=""))
 
-    # query_str = snapshot_query_template.safe_substitute(
-    #     tag=tag or "null",
-    #     dataset_id=dataset,
-    # )
-    # coroutine = _download_files(
-    #     target_dir=target_dir,
-    #     files=files,
-    #     verify_hash=verify_hash,
-    #     verify_size=verify_size,
-    #     max_retries=max_retries,
-    #     retry_backoff=retry_backoff,
-    #     max_concurrent_downloads=max_concurrent_downloads,
-    #     query_str=query_str,
-    # )
+    query_str = snapshot_query_template.safe_substitute(
+        tag=tag or "null",
+        dataset_id=dataset,
+    )
+    coroutine = _download_files(
+        target_dir=target_dir,
+        files=files,
+        verify_hash=verify_hash,
+        verify_size=verify_size,
+        max_retries=max_retries,
+        retry_backoff=retry_backoff,
+        max_concurrent_downloads=max_concurrent_downloads,
+        query_str=query_str,
+    )
 
-    # # Try to re-use event loop if it already exists. This is required e.g.
-    # # for use in Jupyter notebooks.
-    # try:
-    #     loop = asyncio.get_running_loop()
-    #     loop.create_task(coroutine)
-    # except RuntimeError:
-    #     asyncio.run(coroutine)
+    # Try to re-use event loop if it already exists. This is required e.g.
+    # for use in Jupyter notebooks.
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(coroutine)
+    except RuntimeError:
+        asyncio.run(coroutine)
 
-    # tqdm.write(_unicode(f"Finished downloading {dataset}.\n", emoji="✅", end=""))
-    # tqdm.write(_unicode("Please enjoy your brains.\n", emoji="🧠", end=""))
+    tqdm.write(_unicode(f"Finished downloading {dataset}.\n", emoji="✅", end=""))
+    tqdm.write(_unicode("Please enjoy your brains.\n", emoji="🧠", end=""))

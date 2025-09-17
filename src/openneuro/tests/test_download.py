@@ -1,15 +1,22 @@
 """Test downloading and authentication."""
 
 import json
+import copy
 from pathlib import Path
 from unittest import mock
+from unittest.mock import patch
+
 
 import pytest
 
 import openneuro
 import openneuro._config
-from openneuro import download
-from openneuro._download import _skip_directory
+from openneuro import _download
+from openneuro._download import (
+    download,
+    _skip_directory,
+    _download_files,
+)
 
 dataset_id_aws = "ds000246"
 tag_aws = "1.0.0"
@@ -136,122 +143,62 @@ def test_restricted_dataset(tmp_path: Path, openneuro_token: str):
 
 
 @pytest.mark.parametrize(
-    ("root", "include_patterns", "dir_path", "expected"),
+    ("root", "dir_path", "include_patterns", "expected"),
     [
-        # Test Case 1: Root-level directory traversal
-        # When root is empty, we're at the top level
-        ("", ["sub-01"], "sub-01", False),  # sub-01 matches include, so don't skip
-        ("", ["sub-01"], "sub-02", True),   # sub-02 doesn't match include, so skip
-        ("", ["sub-01/ses-meg"], "sub-01/ses-meg", False),  # matches, don't skip
-        ("", ["sub-01/ses-meg"], "sub-01/ses-mri", True),   # doesn't match, skip
+        ('', 'sub-01', ['*'], False),
+        ('', 'sub-01', ['*.json'], True),
+        ('', 'sub-01', ['dataset_description.json'], True),
         
-        # Test Case 2: Directory is a Parent of the Include Pattern
-        ("", ["sub-01/*"], "sub-01", False),  # sub-01 is parent of sub-01/*, don't skip
-        ("", ["sub-01/ses-meg/*"], "sub-01", False),  # sub-01 is parent, don't skip
-        ("", ["sub-01/ses-meg/*"], "sub-01/ses-mri", True),  # doesn't match pattern, skip
-        ("", ["sub-01/ses-meg/*"], "sub-01/ses-meg", False),  # matches, don't skip
-        ("", ["sub-01/ses-meg/*"], "sub-01/ses-meg/meg", False),  # matches, don't skip
-        ("", ["sub-01/*"], "sub-02", True),  # doesn't match, skip
-        ("", ["sub-01/ses-mri/*"], "sub-01/ses-meg", True),  # doesn't match, skip
+        ('', 'sub-01', ['sub-01'], False),
+        ('', 'sub-01', ['sub-01/'], False),
+        ('', 'sub-01', ['sub-01/*'], False),
+        ('', 'sub-01', ['sub-01/**'], False),
+
+        ('', 'sub-01', ['sub-01/ses-meg'], False),
+        ('', 'sub-01', ['sub-01/ses-meg/meg/*.tsv'], False),
+        ('', 'sub-01', ['sub-01/**/*.tsv'], False),
+
+        ('', 'sub-01', ['sub-*'], False),
+        ('', 'sub-01', ['sub-*/'], False),
+        ('', 'sub-01', ['sub-*/**'], False),
+
+        ('', 'sub-01', ['sub-*/**/*.tsv'], False),
+        ('', 'sub-01', ['sub-*/**/meg/**'], False),
+        ('', 'sub-01', ['**/meg/**'], False),
+        ('', 'sub-01', ['**/*.json'], False),
+
+        ('', 'sub-01', ['sub-02'], True),
+        ('', 'sub-01', ['sub-02/'], True),
+        ('', 'sub-01', ['sub-02/*'], True),
+        ('', 'sub-01', ['sub-02/**'], True),
         
-        # Test Case 3: Directory or Subdirectory Match (No Wildcards)
-        ("", ["sub-01/ses-emg"], "sub-01", False),  # sub-01 is parent of sub-01/ses-emg, don't skip
-        ("", ["sub-01/ses-emg/"], "sub-01", False),  # same with trailing slash
-        ("", ["sub-01/ses-meg"], "sub-01/ses-mri", True),  # doesn't match, skip
-        ("", ["sub-01/ses-emg"], "sub-01/ses-emg", False),  # exact match, don't skip
-        ("", ["sub-01/ses-emg/"], "sub-01/ses-emg", False),  # exact match with slash, don't skip
-        ("sub-01", ["sub-01/ses-emg"], "sub-01/ses-emg/meg", False),  # sub-01/ses-emg is parent, don't skip
-        ("sub-01", ["sub-01/ses-emg/"], "sub-01/ses-emg/meg", False),  # same with slash
-        ("", ["sub-01/ses-emg"], "sub-02/ses-emg", True),  # doesn't match, skip
+        ('sub-01', 'sub-01/ses-meg', ['sub-01'], False),
+        ('sub-01', 'sub-01/ses-meg', ['sub-01/ses-meg'], False),
+        ('sub-01', 'sub-01/ses-meg', ['sub-01/ses-meg/meg/*.tsv'], False),
+        ('sub-01', 'sub-01/ses-meg', ['sub-01/ses-meg/*.tsv'], True), # This is failing  
+        ('sub-01', 'sub-01/ses-meg', ['sub-01/ses-mri/'], True),
         
-        # Test Case 4: Wildcard Pattern Prefix Match
-        ("", ["sub-01/*"], "sub-01/ses-meg", False),  # matches sub-01/*, don't skip
-        ("sub-01", ["sub-01/*"], "sub-01/ses-meg/meg", False),  # matches sub-01/*, don't skip
-        ("", ["sub-01/*"], "sub-02/ses-meg", True),  # doesn't match, skip
-        ("", ["sub-01/ses-*"], "sub-01/ses-meg", False),  # matches sub-01/ses-*, don't skip
-        ("", ["sub-01/ses-*"], "sub-01/ses-mri", False),  # matches sub-01/ses-*, don't skip
-        ("", ["sub-01/ses-*"], "sub-01/anat", True),  # doesn't match, skip
-        ("sub-01", ["sub-01/ses-*"], "sub-01/ses-meg/meg", False),  # matches, don't skip
-        ("sub-01", ["sub-01/ses-meg/*"], "sub-01/ses-meg/meg", False),  # matches, don't skip
-        ("sub-01", ["sub-01/ses-mri/*"], "sub-01/ses-meg/meg", True),  # doesn't match, skip
+        ('sub-01/ses-meg', 'sub-01/ses-meg/meg', ['sub-01/*/meg/*.tsv'], False),
+        ('sub-01/ses-meg', 'sub-01/ses-meg/meg', ['sub-01/**/meg/*.tsv'], False),
+        ('sub-01/ses-meg', 'sub-01/ses-meg/meg', ['sub-01/**/*.tsv'], False),
+        ('sub-01/ses-meg', 'sub-01/ses-meg/meg', ['sub-*/**/*.tsv'], False),
+        ('sub-01/ses-meg', 'sub-01/ses-meg/meg', ['sub-*/**/meg/**'], False),
+        ('sub-01/ses-meg', 'sub-01/ses-meg/meg', ['**/meg/**'], False),
+        ('sub-01/ses-meg', 'sub-01/ses-meg/meg', ['**/*.json'], True), # This is failing  
+        ('sub-01/ses-meg', 'sub-01/ses-meg/meg', ['sub-01/ses-meg/*.tsv'], True), # This is failing  
         
-        # Test Case 5: Nested directory traversal (root evolves with dir_path)
-        # When we're inside sub-01, root becomes "sub-01"
-        ("sub-01", ["sub-01/ses-meg"], "sub-01/ses-meg", False),  # exact match, don't skip
-        ("sub-01", ["sub-01/ses-meg"], "sub-01/ses-mri", True),   # doesn't match, skip
-        ("sub-01", ["sub-01/ses-*"], "sub-01/ses-meg", False),   # matches sub-01/ses-*, don't skip
-        ("sub-01", ["sub-01/ses-*"], "sub-01/ses-mri", False),   # matches sub-01/ses-*, don't skip
-        ("sub-01", ["sub-01/ses-*"], "sub-01/anat", True),       # doesn't match, skip
-        
-        # When we're inside sub-01/ses-meg, root becomes "sub-01/ses-meg"
-        ("sub-01/ses-meg", ["sub-01/ses-meg/meg"], "sub-01/ses-meg/meg", False),  # exact match, don't skip
-        ("sub-01/ses-meg", ["sub-01/ses-meg/meg"], "sub-01/ses-meg/anat", True),  # doesn't match, skip
-        ("sub-01/ses-meg", ["sub-01/ses-meg/*"], "sub-01/ses-meg/meg", False),    # matches, don't skip
-        ("sub-01/ses-meg", ["sub-01/ses-meg/*"], "sub-01/ses-meg/anat", False),   # matches, don't skip
-        
-        # Test Case 6: Deep nesting with evolving root
-        ("sub-01/ses-meg", ["sub-01/ses-meg/meg/raw"], "sub-01/ses-meg/meg/raw", False),  # exact match
-        ("sub-01/ses-meg", ["sub-01/ses-meg/meg/raw"], "sub-01/ses-meg/meg/processed", True),  # doesn't match
-        ("sub-01/ses-meg", ["sub-01/ses-meg/meg/*"], "sub-01/ses-meg/meg/raw", False),     # matches wildcard
-        ("sub-01/ses-meg", ["sub-01/ses-meg/meg/*"], "sub-01/ses-meg/anat", True),         # doesn't match
-        
-        # Edge Cases
-        ("", [""], "", False),  # Empty paths match, don't skip
-        ("", ["sub-01"], "", False),  # Empty dir_path matches any include, don't skip
-        ("", ["sub-01/"], "sub-01", False),  # Trailing slash matches, don't skip
-        ("", ["sub-01"], "sub-01/", False),  # Trailing slash on dir_path matches, don't skip
-        ("", ["sub-01/"], "sub-01/", False),  # Both with trailing slash match, don't skip
-        
-        # Deep nesting tests with empty root
-        ("", ["sub-01/*"], "sub-01/ses-meg/meg/raw", False),  # matches sub-01/*, don't skip
-        ("", ["sub-01/ses-*"], "sub-01/ses-meg/meg/raw", False),  # matches sub-01/ses-*, don't skip
-        ("", ["sub-01/ses-meg/*"], "sub-01/ses-meg/meg/raw", False),  # matches, don't skip
-        ("", ["sub-01/ses-meg/meg/*"], "sub-01/ses-meg/meg/raw", False),  # matches, don't skip
-        ("", ["sub-01/ses-mri/*"], "sub-01/ses-meg/meg/raw", True),  # doesn't match, skip
-        ("", ["sub-02/*"], "sub-01/ses-meg/meg/raw", True),  # doesn't match, skip
-        
-        # Complex wildcard patterns
-        ("", ["sub-*"], "sub-01/ses-meg", False),  # matches sub-*, don't skip
-        ("", ["sub-01/ses-*"], "sub-01/ses-meg", False),  # matches sub-01/ses-*, don't skip
-        
-        # Special characters and edge cases
-        ("", ["sub-01_special"], "sub-01_special", False),  # exact match, don't skip
-        ("", ["sub-01-special"], "sub-01-special", False),  # exact match, don't skip
-        ("", ["sub-01.special"], "sub-01.special", False),  # exact match, don't skip
-        ("", ["sub-01-special"], "sub-01_special", True),  # Different separators, skip
-        ("", ["sub-01_special"], "sub-01-special", True),  # Different separators, skip
-        
-        # Multiple wildcards (should match prefix before first *)
-        ("", ["sub-01/*/*"], "sub-01/ses-meg/meg", False),  # matches sub-01/*/*, don't skip
-        ("", ["sub-01/ses-*/*"], "sub-01/ses-meg/meg", False),  # matches sub-01/ses-*/*, don't skip
-        
-        # Very deep paths
-        ("", ["a/*"], "a/b/c/d/e/f/g/h/i/j", False),  # matches a/*, don't skip
-        ("", ["a/b/*"], "a/b/c/d/e/f/g/h/i/j", False),  # matches a/b/*, don't skip
-        ("", ["a/b/c/*"], "a/b/c/d/e/f/g/h/i/j", False),  # matches a/b/c/*, don't skip
-        ("", ["a/b/c/d/*"], "a/b/c/d/e/f/g/h/i/j", False),  # matches a/b/c/d/*, don't skip
-        ("", ["a/b/c/d/e/*"], "a/b/c/d/e/f/g/h/i/j", False),  # matches a/b/c/d/e/*, don't skip
-        ("", ["a/b/c/d/e/f/*"], "a/b/c/d/e/f/g/h/i/j", False),  # matches a/b/c/d/e/f/*, don't skip
-        ("", ["a/b/c/d/e/f/g/*"], "a/b/c/d/e/f/g/h/i/j", False),  # matches a/b/c/d/e/f/g/*, don't skip
-        ("", ["a/b/c/d/e/f/g/h/*"], "a/b/c/d/e/f/g/h/i/j", False),  # matches a/b/c/d/e/f/g/h/*, don't skip
-        ("", ["a/b/c/d/e/f/g/h/i/*"], "a/b/c/d/e/f/g/h/i/j", False),  # matches a/b/c/d/e/f/g/h/i/*, don't skip
-        ("", ["a/b/c/d/e/f/g/h/i/j/*"], "a/b/c/d/e/f/g/h/i/j", False),  # matches a/b/c/d/e/f/g/h/i/j/*, don't skip
-        ("", ["a/b/c/d/e/f/g/h/i/j/k/*"], "a/b/c/d/e/f/g/h/i/j", False),  # matches a/b/c/d/e/f/g/h/i/j/k/*, don't skip
-        ("", ["b/*"], "a/b/c/d/e/f/g/h/i/j", True),  # Wrong prefix, skip
-        
-        # Test with non-empty root (simulating deeper traversal)
-        ("dataset", ["dataset/sub-01"], "dataset/sub-01", False),  # matches, don't skip
-        ("dataset", ["dataset/sub-01"], "dataset/sub-02", True),   # doesn't match, skip
-        ("dataset", ["dataset/sub-01/*"], "dataset/sub-01", False),  # matches, don't skip
-        ("dataset", ["dataset/sub-01/*"], "dataset/sub-01/ses-meg", False),  # matches, don't skip
-        ("dataset", ["dataset/sub-01/*"], "other/sub-01", True),   # doesn't match, skip
-        
-        # Test with mismatched root and dir_path (should handle gracefully)
-        ("sub-01", ["sub-02/*"], "sub-01/ses-meg", True),  # root doesn't match include pattern, skip
-        ("sub-01", ["sub-01/ses-meg"], "sub-02/ses-meg", True),  # dir_path doesn't match root, skip
+        ('', 'derivatives', ['sub-01'], True),
+        ('', 'derivatives', ['sub-01/'], True),
+        ('', 'derivatives', ['sub-01/*'], True),
+        ('', 'derivatives', ['sub-01/**'], True),
+        ('', 'derivatives', ['sub-01/**/*.tsv'], True),
+        ('', 'derivatives', ['sub-*'], True),
+        ('', 'derivatives', ['sub-*/**/meg/**'], True),
+        ('', 'derivatives', ['**/meg/**'], False),
+        ('', 'derivatives', ['**/*.json'], False),
     ],
 )
-def test_skip_directory(root: str, include_patterns: list[str], dir_path: str, expected: bool):
+def test_skip_directory(root: str, dir_path: str, include_patterns: list[str],  expected: bool):
     """Test _skip_directory function with various directory paths and include patterns.
     
     This comprehensive test covers all the different cases handled by the function:
@@ -282,9 +229,454 @@ def test_skip_directory(root: str, include_patterns: list[str], dir_path: str, e
     expected : bool
         Expected result (True if directory should be skipped, False if it should be processed)
     """
-    result = _skip_directory(root, include_patterns, dir_path)
+    result = _skip_directory(root, dir_path, include_patterns)
     assert result == expected, (
         f"_skip_directory('{root}', {include_patterns}, '{dir_path}') "
         f"returned {result}, expected {expected} "
         f"(True=skip directory, False=process directory)"
     )
+
+
+MOCK_METADATA = {
+    "null": {
+        "id": "ds000117:1.1.0",
+        "files": [
+            # Root level files
+            {"filename": "dataset_description.json", "urls": ["http://example.com/dataset_description.json"], "size": 1000, "directory": False, "id": "root1"},
+            {"filename": "participants.tsv", "urls": ["http://example.com/participants.tsv"], "size": 500, "directory": False, "id": "root2"},
+            {"filename": "participants.json", "urls": ["http://example.com/participants.json"], "size": 500, "directory": False, "id": "root3"},
+            {"filename": "README", "urls": ["http://example.com/README"], "size": 2000, "directory": False, "id": "root4"},
+            {"filename": "CHANGES", "urls": ["http://example.com/CHANGES"], "size": 300, "directory": False, "id": "root5"},
+            
+            # Subject directories
+            {'filename': 'derivatives', 'urls': [], 'size': 0, 'directory': True, 'id': 'derivatives'},
+            {'filename': 'sub-01', 'urls': [], 'size': 0, 'directory': True, 'id': 'sub1'},
+            {'filename': 'sub-02', 'urls': [], 'size': 0, 'directory': True, 'id': 'sub2'},
+            {'filename': 'sub-emptyroom', 'urls': [], 'size': 0, 'directory': True, 'id': 'sub-emptyroom'},                        
+        ]
+    },
+    "derivatives": {
+        "files": [
+            {"filename": "freesurfer", "urls": [], "size": 0, "directory": True, "id": "derivatives_freesurfer"},
+            {"filename": "meg_derivatives", "urls": [], "size": 0, "directory": True, "id": "derivatives_meg_derivatives"},
+        ]
+    },
+    "derivatives_meg_derivatives": {
+        "files": [
+            {"filename": "ct_sparse.fif", "urls": ["http://example.com/derivatives/meg_derivatives/ct_sparse.fif"], "size": 1000, "directory": False, "id": "derivatives_meg_derivatives_ct_sparse"},
+            {"filename": "sss_cal.dat", "urls": ["http://example.com/derivatives/meg_derivatives/sss_cal.dat"], "size": 2000, "directory": False, "id": "derivatives_meg_derivatives_sss_cal"},
+        ]
+    },
+    "derivatives_freesurfer": {
+        "files": [
+            {"filename": "README", "urls": ["http://example.com/derivatives/freesurfer/file1.txt"], "size": 123, "directory": False, "id": "derivatives_freesurfer_file1"},
+            {"filename": "sub-01", "urls": [], "size": 0, "directory": True, "id": "derivatives_freesurfer_sub1"},
+            {"filename": "sub-02", "urls": [], "size": 0, "directory": True, "id": "derivatives_freesurfer_sub2"},
+        ]
+    },
+    "derivatives_freesurfer_sub1": {
+        "files": [
+            {"filename": "ses-mri", "urls": [], "size": 0, "directory": True, "id": "derivatives_freesurfer_sub1_ses_mri"},
+        ]
+    },
+    "derivatives_freesurfer_sub1_ses_mri": {
+        "files": [
+            {"filename": "anat", "urls": [], "size": 0, "directory": True, "id": "derivatives_freesurfer_sub1_ses_mri_anat"},
+        ]
+    },
+    "derivatives_freesurfer_sub1_ses_mri_anat": {
+        "files": [
+            {"filename": "label", "urls": [], "size": 0, "directory": True, "id": "derivatives_freesurfer_sub1_ses_mri_anat_label"},
+            {"filename": "mri", "urls": [], "size": 0, "directory": True, "id": "derivatives_freesurfer_sub1_ses_mri_anat_mri"},
+            {"filename": "surf", "urls": [], "size": 0, "directory": True, "id": "derivatives_freesurfer_sub1_ses_mri_anat_surf"},
+        ]
+    },
+    "derivatives_freesurfer_sub1_ses_mri_anat_label": {
+        "files": [
+            {"filename": ".lh.BA.thresh.annot.f3h5wZ", "urls": ["http://example.com/derivatives/freesurfer/sub-01/ses-mri/anat/label/.lh.BA.thresh.annot.f3h5wZ"], "size": 1000, "directory": False, "id": "derivatives_freesurfer_sub1_label_hidden"},
+            {"filename": "lh.BA.annot", "urls": ["http://example.com/derivatives/freesurfer/sub-01/ses-mri/anat/label/lh.BA.annot"], "size": 2000, "directory": False, "id": "derivatives_freesurfer_sub1_label_lh_ba"},
+            {"filename": "lh.BA.thresh.annot", "urls": ["http://example.com/derivatives/freesurfer/sub-01/ses-mri/anat/label/lh.BA.thresh.annot"], "size": 2000, "directory": False, "id": "derivatives_freesurfer_sub1_label_lh_ba_thresh"},
+            {"filename": "lh.aparc.DKTatlas40.annot", "urls": ["http://example.com/derivatives/freesurfer/sub-01/ses-mri/anat/label/lh.aparc.DKTatlas40.annot"], "size": 2000, "directory": False, "id": "derivatives_freesurfer_sub1_label_lh_aparc_dkt"},
+            {"filename": "lh.aparc.a2009s.annot", "urls": ["http://example.com/derivatives/freesurfer/sub-01/ses-mri/anat/label/lh.aparc.a2009s.annot"], "size": 2000, "directory": False, "id": "derivatives_freesurfer_sub1_label_lh_aparc_a2009s"},
+            {"filename": "lh.aparc.annot", "urls": ["http://example.com/derivatives/freesurfer/sub-01/ses-mri/anat/label/lh.aparc.annot"], "size": 2000, "directory": False, "id": "derivatives_freesurfer_sub1_label_lh_aparc"},
+            {"filename": "rh.BA.annot", "urls": ["http://example.com/derivatives/freesurfer/sub-01/ses-mri/anat/label/rh.BA.annot"], "size": 2000, "directory": False, "id": "derivatives_freesurfer_sub1_label_rh_ba"},
+            {"filename": "rh.BA.thresh.annot", "urls": ["http://example.com/derivatives/freesurfer/sub-01/ses-mri/anat/label/rh.BA.thresh.annot"], "size": 2000, "directory": False, "id": "derivatives_freesurfer_sub1_label_rh_ba_thresh"},
+            {"filename": "rh.aparc.DKTatlas40.annot", "urls": ["http://example.com/derivatives/freesurfer/sub-01/ses-mri/anat/label/rh.aparc.DKTatlas40.annot"], "size": 2000, "directory": False, "id": "derivatives_freesurfer_sub1_label_rh_aparc_dkt"},
+            {"filename": "rh.aparc.a2009s.annot", "urls": ["http://example.com/derivatives/freesurfer/sub-01/ses-mri/anat/label/rh.aparc.a2009s.annot"], "size": 2000, "directory": False, "id": "derivatives_freesurfer_sub1_label_rh_aparc_a2009s"},
+            {"filename": "rh.aparc.annot", "urls": ["http://example.com/derivatives/freesurfer/sub-01/ses-mri/anat/label/rh.aparc.annot"], "size": 2000, "directory": False, "id": "derivatives_freesurfer_sub1_label_rh_aparc"},
+        ]
+    },
+    "derivatives_freesurfer_sub1_ses_mri_anat_mri": {
+        "files": [
+            {"filename": "T1.mgz", "urls": ["http://example.com/derivatives/freesurfer/sub-01/ses-mri/anat/mri/T1.mgz"], "size": 50000, "directory": False, "id": "derivatives_freesurfer_sub1_mri_t1"},
+            {"filename": "aseg.mgz", "urls": ["http://example.com/derivatives/freesurfer/sub-01/ses-mri/anat/mri/aseg.mgz"], "size": 10000, "directory": False, "id": "derivatives_freesurfer_sub1_mri_aseg"},
+        ]
+    },
+    "derivatives_freesurfer_sub1_ses_mri_anat_surf": {
+        "files": [
+            {"filename": "lh.pial", "urls": ["http://example.com/derivatives/freesurfer/sub-01/ses-mri/anat/surf/lh.pial"], "size": 30000, "directory": False, "id": "derivatives_freesurfer_sub1_surf_lh_pial"},
+            {"filename": "lh.sphere.reg", "urls": ["http://example.com/derivatives/freesurfer/sub-01/ses-mri/anat/surf/lh.sphere.reg"], "size": 30000, "directory": False, "id": "derivatives_freesurfer_sub1_surf_lh_sphere"},
+            {"filename": "lh.white", "urls": ["http://example.com/derivatives/freesurfer/sub-01/ses-mri/anat/surf/lh.white"], "size": 30000, "directory": False, "id": "derivatives_freesurfer_sub1_surf_lh_white"},
+            {"filename": "rh.pial", "urls": ["http://example.com/derivatives/freesurfer/sub-01/ses-mri/anat/surf/rh.pial"], "size": 30000, "directory": False, "id": "derivatives_freesurfer_sub1_surf_rh_pial"},
+            {"filename": "rh.sphere.reg", "urls": ["http://example.com/derivatives/freesurfer/sub-01/ses-mri/anat/surf/rh.sphere.reg"], "size": 30000, "directory": False, "id": "derivatives_freesurfer_sub1_surf_rh_sphere"},
+            {"filename": "rh.white", "urls": ["http://example.com/derivatives/freesurfer/sub-01/ses-mri/anat/surf/rh.white"], "size": 30000, "directory": False, "id": "derivatives_freesurfer_sub1_surf_rh_white"},
+        ]
+    },
+    "derivatives_freesurfer_sub2": {
+        "files": [
+            {"filename": "ses-mri", "urls": [], "size": 0, "directory": True, "id": "derivatives_freesurfer_sub2_ses_mri"},
+        ]
+    },
+    "derivatives_freesurfer_sub2_ses_mri": {
+        "files": [
+            {"filename": "anat", "urls": [], "size": 0, "directory": True, "id": "derivatives_freesurfer_sub2_ses_mri_anat"},
+        ]
+    },
+    "derivatives_freesurfer_sub2_ses_mri_anat": {
+        "files": [
+            {"filename": "label", "urls": [], "size": 0, "directory": True, "id": "derivatives_freesurfer_sub2_ses_mri_anat_label"},
+            {"filename": "mri", "urls": [], "size": 0, "directory": True, "id": "derivatives_freesurfer_sub2_ses_mri_anat_mri"},
+            {"filename": "surf", "urls": [], "size": 0, "directory": True, "id": "derivatives_freesurfer_sub2_ses_mri_anat_surf"},
+        ]
+    },
+    "derivatives_freesurfer_sub2_ses_mri_anat_label": {
+        "files": [
+            {"filename": "lh.BA.annot", "urls": ["http://example.com/derivatives/freesurfer/sub-02/ses-mri/anat/label/lh.BA.annot"], "size": 2000, "directory": False, "id": "derivatives_freesurfer_sub2_label_lh_ba"},
+            {"filename": "lh.BA.thresh.annot", "urls": ["http://example.com/derivatives/freesurfer/sub-02/ses-mri/anat/label/lh.BA.thresh.annot"], "size": 2000, "directory": False, "id": "derivatives_freesurfer_sub2_label_lh_ba_thresh"},
+            {"filename": "lh.aparc.DKTatlas40.annot", "urls": ["http://example.com/derivatives/freesurfer/sub-02/ses-mri/anat/label/lh.aparc.DKTatlas40.annot"], "size": 2000, "directory": False, "id": "derivatives_freesurfer_sub2_label_lh_aparc_dkt"},
+            {"filename": "lh.aparc.a2009s.annot", "urls": ["http://example.com/derivatives/freesurfer/sub-02/ses-mri/anat/label/lh.aparc.a2009s.annot"], "size": 2000, "directory": False, "id": "derivatives_freesurfer_sub2_label_lh_aparc_a2009s"},
+            {"filename": "lh.aparc.annot", "urls": ["http://example.com/derivatives/freesurfer/sub-02/ses-mri/anat/label/lh.aparc.annot"], "size": 2000, "directory": False, "id": "derivatives_freesurfer_sub2_label_lh_aparc"},
+            {"filename": "rh.BA.annot", "urls": ["http://example.com/derivatives/freesurfer/sub-02/ses-mri/anat/label/rh.BA.annot"], "size": 2000, "directory": False, "id": "derivatives_freesurfer_sub2_label_rh_ba"},
+            {"filename": "rh.BA.thresh.annot", "urls": ["http://example.com/derivatives/freesurfer/sub-02/ses-mri/anat/label/rh.BA.thresh.annot"], "size": 2000, "directory": False, "id": "derivatives_freesurfer_sub2_label_rh_ba_thresh"},
+            {"filename": "rh.aparc.DKTatlas40.annot", "urls": ["http://example.com/derivatives/freesurfer/sub-02/ses-mri/anat/label/rh.aparc.DKTatlas40.annot"], "size": 2000, "directory": False, "id": "derivatives_freesurfer_sub2_label_rh_aparc_dkt"},
+            {"filename": "rh.aparc.a2009s.annot", "urls": ["http://example.com/derivatives/freesurfer/sub-02/ses-mri/anat/label/rh.aparc.a2009s.annot"], "size": 2000, "directory": False, "id": "derivatives_freesurfer_sub2_label_rh_aparc_a2009s"},
+            {"filename": "rh.aparc.annot", "urls": ["http://example.com/derivatives/freesurfer/sub-02/ses-mri/anat/label/rh.aparc.annot"], "size": 2000, "directory": False, "id": "derivatives_freesurfer_sub2_label_rh_aparc"},
+        ]
+    },
+    "derivatives_freesurfer_sub2_ses_mri_anat_mri": {
+        "files": [
+            {"filename": "T1.mgz", "urls": ["http://example.com/derivatives/freesurfer/sub-02/ses-mri/anat/mri/T1.mgz"], "size": 50000, "directory": False, "id": "derivatives_freesurfer_sub2_mri_t1"},
+            {"filename": "aseg.mgz", "urls": ["http://example.com/derivatives/freesurfer/sub-02/ses-mri/anat/mri/aseg.mgz"], "size": 10000, "directory": False, "id": "derivatives_freesurfer_sub2_mri_aseg"},
+        ]
+    },
+    "derivatives_freesurfer_sub2_ses_mri_anat_surf": {
+        "files": [
+            {"filename": "lh.pial", "urls": ["http://example.com/derivatives/freesurfer/sub-02/ses-mri/anat/surf/lh.pial"], "size": 30000, "directory": False, "id": "derivatives_freesurfer_sub2_surf_lh_pial"},
+            {"filename": "lh.sphere.reg", "urls": ["http://example.com/derivatives/freesurfer/sub-02/ses-mri/anat/surf/lh.sphere.reg"], "size": 30000, "directory": False, "id": "derivatives_freesurfer_sub2_surf_lh_sphere"},
+            {"filename": "lh.white", "urls": ["http://example.com/derivatives/freesurfer/sub-02/ses-mri/anat/surf/lh.white"], "size": 30000, "directory": False, "id": "derivatives_freesurfer_sub2_surf_lh_white"},
+            {"filename": "rh.pial", "urls": ["http://example.com/derivatives/freesurfer/sub-02/ses-mri/anat/surf/rh.pial"], "size": 30000, "directory": False, "id": "derivatives_freesurfer_sub2_surf_rh_pial"},
+            {"filename": "rh.sphere.reg", "urls": ["http://example.com/derivatives/freesurfer/sub-02/ses-mri/anat/surf/rh.sphere.reg"], "size": 30000, "directory": False, "id": "derivatives_freesurfer_sub2_surf_rh_sphere"},
+            {"filename": "rh.white", "urls": ["http://example.com/derivatives/freesurfer/sub-02/ses-mri/anat/surf/rh.white"], "size": 30000, "directory": False, "id": "derivatives_freesurfer_sub2_surf_rh_white"},
+        ]
+    },
+    "sub1": {
+        "files": [
+            {"filename": "ses-meg", 'urls': [], 'size': 0, 'directory': True, 'id': "sub1_ses_meg"},
+            {"filename": "ses-mri", "urls": [], "size": 0, "directory": True, "id": "sub1_ses_mri"},
+        ]
+    },
+    "sub1_ses_meg": {
+        "files": [
+            {"filename": "sub-01_ses-meg_scans.tsv", "urls": ["http://example.com/sub-01/ses-meg/sub-01_ses-meg_scans.tsv"], "size": 500, "directory": False, "id": "sub1_ses_meg_scans"},
+            {"filename": "sub-01_ses-meg_task-facerecognition_channels.tsv", "urls": ["http://example.com/sub-01/ses-meg/sub-01_ses-meg_task-facerecognition_channels.tsv"], "size": 800, "directory": False, "id": "sub1_ses_meg_channels"},
+            {"filename": "sub-01_ses-meg_task-facerecognition_meg.json", "urls": ["http://example.com/sub-01/ses-meg/sub-01_ses-meg_task-facerecognition_meg.json"], "size": 1200, "directory": False, "id": "sub1_ses_meg_meg_json"},
+            {"filename": "beh", "urls": [], "size": 0, "directory": True, "id": "sub1_ses_meg_beh"},
+            {"filename": "meg", "urls": [], "size": 0, "directory": True, "id": "sub1_ses_meg_meg"},
+        ]
+    },
+    "sub1_ses_meg_beh": {
+        "files": [
+            {"filename": "sub-01_ses-meg_task-facerecognition_events.tsv", "urls": ["http://example.com/sub-01/ses-meg/beh/sub-01_ses-meg_task-facerecognition_events.tsv"], "size": 600, "directory": False, "id": "sub1_ses_meg_beh_events"},
+        ]
+    },
+    "sub1_ses_meg_meg": {
+        "files": [
+            {"filename": "sub-01_ses-meg_coordsystem.json", "urls": ["http://example.com/sub-01/ses-meg/meg/sub-01_ses-meg_coordsystem.json"], "size": 400, "directory": False, "id": "sub1_ses_meg_meg_coordsystem"},
+            {"filename": "sub-01_ses-meg_headshape.pos", "urls": ["http://example.com/sub-01/ses-meg/meg/sub-01_ses-meg_headshape.pos"], "size": 15000, "directory": False, "id": "sub1_ses_meg_meg_headshape"},
+            {"filename": "sub-01_ses-meg_task-facerecognition_run-01_events.tsv", "urls": ["http://example.com/sub-01/ses-meg/meg/sub-01_ses-meg_task-facerecognition_run-01_events.tsv"], "size": 800, "directory": False, "id": "sub1_ses_meg_meg_run01_events"},
+            {"filename": "sub-01_ses-meg_task-facerecognition_run-01_meg.fif", "urls": ["http://example.com/sub-01/ses-meg/meg/sub-01_ses-meg_task-facerecognition_run-01_meg.fif"], "size": 50000000, "directory": False, "id": "sub1_ses_meg_meg_run01_fif"},
+            {"filename": "sub-01_ses-meg_task-facerecognition_run-02_events.tsv", "urls": ["http://example.com/sub-01/ses-meg/meg/sub-01_ses-meg_task-facerecognition_run-02_events.tsv"], "size": 800, "directory": False, "id": "sub1_ses_meg_meg_run02_events"},
+            {"filename": "sub-01_ses-meg_task-facerecognition_run-02_meg.fif", "urls": ["http://example.com/sub-01/ses-meg/meg/sub-01_ses-meg_task-facerecognition_run-02_meg.fif"], "size": 50000000, "directory": False, "id": "sub1_ses_meg_meg_run02_fif"},
+        ]
+    },
+    "sub1_ses_mri": {
+        "files": [
+            {"filename": "anat", "urls": [], "size": 0, "directory": True, "id": "sub1_ses_mri_anat"},
+            {"filename": "dwi", "urls": [], "size": 0, "directory": True, "id": "sub1_ses_mri_dwi"},
+            {"filename": "func", "urls": [], "size": 0, "directory": True, "id": "sub1_ses_mri_func"},
+            {"filename": "fmap", "urls": [], "size": 0, "directory": True, "id": "sub1_ses_mri_fmap"},
+        ]
+    },
+    "sub1_ses_mri_anat": {
+        "files": [
+            {"filename": "sub-01_ses-mri_acq-mprage_T1w.json", "urls": ["http://example.com/sub-01/ses-mri/anat/sub-01_ses-mri_acq-mprage_T1w.json"], "size": 800, "directory": False, "id": "sub1_ses_mri_anat_t1w_json"},
+            {"filename": "sub-01_ses-mri_acq-mprage_T1w.nii.gz", "urls": ["http://example.com/sub-01/ses-mri/anat/sub-01_ses-mri_acq-mprage_T1w.nii.gz"], "size": 50000000, "directory": False, "id": "sub1_ses_mri_anat_t1w_nii"},
+            {"filename": "sub-01_ses-mri_run-1_echo-1_FLASH.nii.gz", "urls": ["http://example.com/sub-01/ses-mri/anat/sub-01_ses-mri_run-1_echo-1_FLASH.nii.gz"], "size": 20000000, "directory": False, "id": "sub1_ses_mri_anat_flash1_echo1"},
+            {"filename": "sub-01_ses-mri_run-1_echo-2_FLASH.nii.gz", "urls": ["http://example.com/sub-01/ses-mri/anat/sub-01_ses-mri_run-1_echo-2_FLASH.nii.gz"], "size": 20000000, "directory": False, "id": "sub1_ses_mri_anat_flash1_echo2"},
+            {"filename": "sub-01_ses-mri_run-1_echo-3_FLASH.nii.gz", "urls": ["http://example.com/sub-01/ses-mri/anat/sub-01_ses-mri_run-1_echo-3_FLASH.nii.gz"], "size": 20000000, "directory": False, "id": "sub1_ses_mri_anat_flash1_echo3"},
+            {"filename": "sub-01_ses-mri_run-1_echo-4_FLASH.nii.gz", "urls": ["http://example.com/sub-01/ses-mri/anat/sub-01_ses-mri_run-1_echo-4_FLASH.nii.gz"], "size": 20000000, "directory": False, "id": "sub1_ses_mri_anat_flash1_echo4"},
+            {"filename": "sub-01_ses-mri_run-1_echo-5_FLASH.nii.gz", "urls": ["http://example.com/sub-01/ses-mri/anat/sub-01_ses-mri_run-1_echo-5_FLASH.nii.gz"], "size": 20000000, "directory": False, "id": "sub1_ses_mri_anat_flash1_echo5"},
+            {"filename": "sub-01_ses-mri_run-1_echo-6_FLASH.nii.gz", "urls": ["http://example.com/sub-01/ses-mri/anat/sub-01_ses-mri_run-1_echo-6_FLASH.nii.gz"], "size": 20000000, "directory": False, "id": "sub1_ses_mri_anat_flash1_echo6"},
+            {"filename": "sub-01_ses-mri_run-1_echo-7_FLASH.nii.gz", "urls": ["http://example.com/sub-01/ses-mri/anat/sub-01_ses-mri_run-1_echo-7_FLASH.nii.gz"], "size": 20000000, "directory": False, "id": "sub1_ses_mri_anat_flash1_echo7"},
+            {"filename": "sub-01_ses-mri_run-2_echo-1_FLASH.nii.gz", "urls": ["http://example.com/sub-01/ses-mri/anat/sub-01_ses-mri_run-2_echo-1_FLASH.nii.gz"], "size": 20000000, "directory": False, "id": "sub1_ses_mri_anat_flash2_echo1"},
+            {"filename": "sub-01_ses-mri_run-2_echo-2_FLASH.nii.gz", "urls": ["http://example.com/sub-01/ses-mri/anat/sub-01_ses-mri_run-2_echo-2_FLASH.nii.gz"], "size": 20000000, "directory": False, "id": "sub1_ses_mri_anat_flash2_echo2"},
+            {"filename": "sub-01_ses-mri_run-2_echo-3_FLASH.nii.gz", "urls": ["http://example.com/sub-01/ses-mri/anat/sub-01_ses-mri_run-2_echo-3_FLASH.nii.gz"], "size": 20000000, "directory": False, "id": "sub1_ses_mri_anat_flash2_echo3"},
+            {"filename": "sub-01_ses-mri_run-2_echo-4_FLASH.nii.gz", "urls": ["http://example.com/sub-01/ses-mri/anat/sub-01_ses-mri_run-2_echo-4_FLASH.nii.gz"], "size": 20000000, "directory": False, "id": "sub1_ses_mri_anat_flash2_echo4"},
+            {"filename": "sub-01_ses-mri_run-2_echo-5_FLASH.nii.gz", "urls": ["http://example.com/sub-01/ses-mri/anat/sub-01_ses-mri_run-2_echo-5_FLASH.nii.gz"], "size": 20000000, "directory": False, "id": "sub1_ses_mri_anat_flash2_echo5"},
+            {"filename": "sub-01_ses-mri_run-2_echo-6_FLASH.nii.gz", "urls": ["http://example.com/sub-01/ses-mri/anat/sub-01_ses-mri_run-2_echo-6_FLASH.nii.gz"], "size": 20000000, "directory": False, "id": "sub1_ses_mri_anat_flash2_echo6"},
+            {"filename": "sub-01_ses-mri_run-2_echo-7_FLASH.nii.gz", "urls": ["http://example.com/sub-01/ses-mri/anat/sub-01_ses-mri_run-2_echo-7_FLASH.nii.gz"], "size": 20000000, "directory": False, "id": "sub1_ses_mri_anat_flash2_echo7"},
+        ]
+    },
+    "sub1_ses_mri_dwi": {
+        "files": [
+            {"filename": "sub-01_ses-mri_dwi.bval", "urls": ["http://example.com/sub-01/ses-mri/dwi/sub-01_ses-mri_dwi.bval"], "size": 1000, "directory": False, "id": "sub1_ses_mri_dwi_bval"},
+            {"filename": "sub-01_ses-mri_dwi.bvec", "urls": ["http://example.com/sub-01/ses-mri/dwi/sub-01_ses-mri_dwi.bvec"], "size": 2000, "directory": False, "id": "sub1_ses_mri_dwi_bvec"},
+            {"filename": "sub-01_ses-mri_dwi.json", "urls": ["http://example.com/sub-01/ses-mri/dwi/sub-01_ses-mri_dwi.json"], "size": 800, "directory": False, "id": "sub1_ses_mri_dwi_json"},
+            {"filename": "sub-01_ses-mri_dwi.nii.gz", "urls": ["http://example.com/sub-01/ses-mri/dwi/sub-01_ses-mri_dwi.nii.gz"], "size": 30000000, "directory": False, "id": "sub1_ses_mri_dwi_nii"},
+        ]
+    },
+    "sub1_ses_mri_fmap": {
+        "files": [
+            {"filename": "sub-01_ses-mri_magnitude1.json", "urls": ["http://example.com/sub-01/ses-mri/fmap/sub-01_ses-mri_magnitude1.json"], "size": 400, "directory": False, "id": "sub1_ses_mri_fmap_mag1_json"},
+            {"filename": "sub-01_ses-mri_magnitude1.nii", "urls": ["http://example.com/sub-01/ses-mri/fmap/sub-01_ses-mri_magnitude1.nii"], "size": 10000000, "directory": False, "id": "sub1_ses_mri_fmap_mag1_nii"},
+            {"filename": "sub-01_ses-mri_magnitude2.json", "urls": ["http://example.com/sub-01/ses-mri/fmap/sub-01_ses-mri_magnitude2.json"], "size": 400, "directory": False, "id": "sub1_ses_mri_fmap_mag2_json"},
+            {"filename": "sub-01_ses-mri_magnitude2.nii", "urls": ["http://example.com/sub-01/ses-mri/fmap/sub-01_ses-mri_magnitude2.nii"], "size": 10000000, "directory": False, "id": "sub1_ses_mri_fmap_mag2_nii"},
+            {"filename": "sub-01_ses-mri_phasediff.json", "urls": ["http://example.com/sub-01/ses-mri/fmap/sub-01_ses-mri_phasediff.json"], "size": 400, "directory": False, "id": "sub1_ses_mri_fmap_phasediff_json"},
+            {"filename": "sub-01_ses-mri_phasediff.nii", "urls": ["http://example.com/sub-01/ses-mri/fmap/sub-01_ses-mri_phasediff.nii"], "size": 10000000, "directory": False, "id": "sub1_ses_mri_fmap_phasediff_nii"},
+        ]
+    },
+    "sub1_ses_mri_func": {
+        "files": [
+            {"filename": "sub-01_ses-mri_task-facerecognition_run-01_bold.json", "urls": ["http://example.com/sub-01/ses-mri/func/sub-01_ses-mri_task-facerecognition_run-01_bold.json"], "size": 800, "directory": False, "id": "sub1_ses_mri_func_run01_bold_json"},
+            {"filename": "sub-01_ses-mri_task-facerecognition_run-01_bold.nii.gz", "urls": ["http://example.com/sub-01/ses-mri/func/sub-01_ses-mri_task-facerecognition_run-01_bold.nii.gz"], "size": 40000000, "directory": False, "id": "sub1_ses_mri_func_run01_bold_nii"},
+            {"filename": "sub-01_ses-mri_task-facerecognition_run-01_events.tsv", "urls": ["http://example.com/sub-01/ses-mri/func/sub-01_ses-mri_task-facerecognition_run-01_events.tsv"], "size": 600, "directory": False, "id": "sub1_ses_mri_func_run01_events"},
+            {"filename": "sub-01_ses-mri_task-facerecognition_run-02_bold.json", "urls": ["http://example.com/sub-01/ses-mri/func/sub-01_ses-mri_task-facerecognition_run-02_bold.json"], "size": 800, "directory": False, "id": "sub1_ses_mri_func_run02_bold_json"},
+            {"filename": "sub-01_ses-mri_task-facerecognition_run-02_bold.nii.gz", "urls": ["http://example.com/sub-01/ses-mri/func/sub-01_ses-mri_task-facerecognition_run-02_bold.nii.gz"], "size": 40000000, "directory": False, "id": "sub1_ses_mri_func_run02_bold_nii"},
+            {"filename": "sub-01_ses-mri_task-facerecognition_run-02_events.tsv", "urls": ["http://example.com/sub-01/ses-mri/func/sub-01_ses-mri_task-facerecognition_run-02_events.tsv"], "size": 600, "directory": False, "id": "sub1_ses_mri_func_run02_events"},
+        ]
+    },
+    "sub2": {
+        "files": [
+            {"filename": "ses-meg", 'urls': [], 'size': 0, 'directory': True, 'id': "sub2_ses_meg"},
+            {"filename": "ses-mri", "urls": [], "size": 0, "directory": True, "id": "sub2_ses_mri"},
+        ]
+    },
+    "sub2_ses_meg": {
+        "files": [
+            {"filename": "sub-02_ses-meg_scans.tsv", "urls": ["http://example.com/sub-02/ses-meg/sub-02_ses-meg_scans.tsv"], "size": 500, "directory": False, "id": "sub2_ses_meg_scans"},
+            {"filename": "sub-02_ses-meg_task-facerecognition_channels.tsv", "urls": ["http://example.com/sub-02/ses-meg/sub-02_ses-meg_task-facerecognition_channels.tsv"], "size": 800, "directory": False, "id": "sub2_ses_meg_channels"},
+            {"filename": "sub-02_ses-meg_task-facerecognition_meg.json", "urls": ["http://example.com/sub-02/ses-meg/sub-02_ses-meg_task-facerecognition_meg.json"], "size": 1200, "directory": False, "id": "sub2_ses_meg_meg_json"},
+            {"filename": "beh", "urls": [], "size": 0, "directory": True, "id": "sub2_ses_meg_beh"},
+            {"filename": "meg", "urls": [], "size": 0, "directory": True, "id": "sub2_ses_meg_meg"},
+        ]
+    },
+    "sub2_ses_meg_beh": {
+        "files": [
+            {"filename": "sub-02_ses-meg_task-facerecognition_events.tsv", "urls": ["http://example.com/sub-02/ses-meg/beh/sub-02_ses-meg_task-facerecognition_events.tsv"], "size": 600, "directory": False, "id": "sub2_ses_meg_beh_events"},
+        ]
+    },
+    "sub2_ses_meg_meg": {
+        "files": [
+            {"filename": "sub-02_ses-meg_coordsystem.json", "urls": ["http://example.com/sub-02/ses-meg/meg/sub-02_ses-meg_coordsystem.json"], "size": 400, "directory": False, "id": "sub2_ses_meg_meg_coordsystem"},
+            {"filename": "sub-02_ses-meg_headshape.pos", "urls": ["http://example.com/sub-02/ses-meg/meg/sub-02_ses-meg_headshape.pos"], "size": 15000, "directory": False, "id": "sub2_ses_meg_meg_headshape"},
+            {"filename": "sub-02_ses-meg_task-facerecognition_run-01_events.tsv", "urls": ["http://example.com/sub-02/ses-meg/meg/sub-02_ses-meg_task-facerecognition_run-01_events.tsv"], "size": 800, "directory": False, "id": "sub2_ses_meg_meg_run01_events"},
+            {"filename": "sub-02_ses-meg_task-facerecognition_run-01_meg.fif", "urls": ["http://example.com/sub-02/ses-meg/meg/sub-02_ses-meg_task-facerecognition_run-01_meg.fif"], "size": 50000000, "directory": False, "id": "sub2_ses_meg_meg_run01_fif"},
+            {"filename": "sub-02_ses-meg_task-facerecognition_run-02_events.tsv", "urls": ["http://example.com/sub-02/ses-meg/meg/sub-02_ses-meg_task-facerecognition_run-02_events.tsv"], "size": 800, "directory": False, "id": "sub2_ses_meg_meg_run02_events"},
+            {"filename": "sub-02_ses-meg_task-facerecognition_run-02_meg.fif", "urls": ["http://example.com/sub-02/ses-meg/meg/sub-02_ses-meg_task-facerecognition_run-02_meg.fif"], "size": 50000000, "directory": False, "id": "sub2_ses_meg_meg_run02_fif"},
+        ]
+    },
+    "sub2_ses_mri": {
+        "files": [
+            {"filename": "anat", "urls": [], "size": 0, "directory": True, "id": "sub2_ses_mri_anat"},
+            {"filename": "dwi", "urls": [], "size": 0, "directory": True, "id": "sub2_ses_mri_dwi"},
+            {"filename": "func", "urls": [], "size": 0, "directory": True, "id": "sub2_ses_mri_func"},
+            {"filename": "fmap", "urls": [], "size": 0, "directory": True, "id": "sub2_ses_mri_fmap"},
+        ]
+    },
+    "sub2_ses_mri_anat": {
+        "files": [
+            {"filename": "sub-02_ses-mri_acq-mprage_T1w.json", "urls": ["http://example.com/sub-02/ses-mri/anat/sub-02_ses-mri_acq-mprage_T1w.json"], "size": 800, "directory": False, "id": "sub2_ses_mri_anat_t1w_json"},
+            {"filename": "sub-02_ses-mri_acq-mprage_T1w.nii.gz", "urls": ["http://example.com/sub-02/ses-mri/anat/sub-02_ses-mri_acq-mprage_T1w.nii.gz"], "size": 50000000, "directory": False, "id": "sub2_ses_mri_anat_t1w_nii"},
+            {"filename": "sub-02_ses-mri_run-1_echo-1_FLASH.nii.gz", "urls": ["http://example.com/sub-02/ses-mri/anat/sub-02_ses-mri_run-1_echo-1_FLASH.nii.gz"], "size": 20000000, "directory": False, "id": "sub2_ses_mri_anat_flash1_echo1"},
+            {"filename": "sub-02_ses-mri_run-1_echo-2_FLASH.nii.gz", "urls": ["http://example.com/sub-02/ses-mri/anat/sub-02_ses-mri_run-1_echo-2_FLASH.nii.gz"], "size": 20000000, "directory": False, "id": "sub2_ses_mri_anat_flash1_echo2"},
+            {"filename": "sub-02_ses-mri_run-1_echo-3_FLASH.nii.gz", "urls": ["http://example.com/sub-02/ses-mri/anat/sub-02_ses-mri_run-1_echo-3_FLASH.nii.gz"], "size": 20000000, "directory": False, "id": "sub2_ses_mri_anat_flash1_echo3"},
+            {"filename": "sub-02_ses-mri_run-1_echo-4_FLASH.nii.gz", "urls": ["http://example.com/sub-02/ses-mri/anat/sub-02_ses-mri_run-1_echo-4_FLASH.nii.gz"], "size": 20000000, "directory": False, "id": "sub2_ses_mri_anat_flash1_echo4"},
+            {"filename": "sub-02_ses-mri_run-1_echo-5_FLASH.nii.gz", "urls": ["http://example.com/sub-02/ses-mri/anat/sub-02_ses-mri_run-1_echo-5_FLASH.nii.gz"], "size": 20000000, "directory": False, "id": "sub2_ses_mri_anat_flash1_echo5"},
+            {"filename": "sub-02_ses-mri_run-1_echo-6_FLASH.nii.gz", "urls": ["http://example.com/sub-02/ses-mri/anat/sub-02_ses-mri_run-1_echo-6_FLASH.nii.gz"], "size": 20000000, "directory": False, "id": "sub2_ses_mri_anat_flash1_echo6"},
+            {"filename": "sub-02_ses-mri_run-1_echo-7_FLASH.nii.gz", "urls": ["http://example.com/sub-02/ses-mri/anat/sub-02_ses-mri_run-1_echo-7_FLASH.nii.gz"], "size": 20000000, "directory": False, "id": "sub2_ses_mri_anat_flash1_echo7"},
+            {"filename": "sub-02_ses-mri_run-2_echo-1_FLASH.nii.gz", "urls": ["http://example.com/sub-02/ses-mri/anat/sub-02_ses-mri_run-2_echo-1_FLASH.nii.gz"], "size": 20000000, "directory": False, "id": "sub2_ses_mri_anat_flash2_echo1"},
+            {"filename": "sub-02_ses-mri_run-2_echo-2_FLASH.nii.gz", "urls": ["http://example.com/sub-02/ses-mri/anat/sub-02_ses-mri_run-2_echo-2_FLASH.nii.gz"], "size": 20000000, "directory": False, "id": "sub2_ses_mri_anat_flash2_echo2"},
+            {"filename": "sub-02_ses-mri_run-2_echo-3_FLASH.nii.gz", "urls": ["http://example.com/sub-02/ses-mri/anat/sub-02_ses-mri_run-2_echo-3_FLASH.nii.gz"], "size": 20000000, "directory": False, "id": "sub2_ses_mri_anat_flash2_echo3"},
+            {"filename": "sub-02_ses-mri_run-2_echo-4_FLASH.nii.gz", "urls": ["http://example.com/sub-02/ses-mri/anat/sub-02_ses-mri_run-2_echo-4_FLASH.nii.gz"], "size": 20000000, "directory": False, "id": "sub2_ses_mri_anat_flash2_echo4"},
+            {"filename": "sub-02_ses-mri_run-2_echo-5_FLASH.nii.gz", "urls": ["http://example.com/sub-02/ses-mri/anat/sub-02_ses-mri_run-2_echo-5_FLASH.nii.gz"], "size": 20000000, "directory": False, "id": "sub2_ses_mri_anat_flash2_echo5"},
+            {"filename": "sub-02_ses-mri_run-2_echo-6_FLASH.nii.gz", "urls": ["http://example.com/sub-02/ses-mri/anat/sub-02_ses-mri_run-2_echo-6_FLASH.nii.gz"], "size": 20000000, "directory": False, "id": "sub2_ses_mri_anat_flash2_echo6"},
+            {"filename": "sub-02_ses-mri_run-2_echo-7_FLASH.nii.gz", "urls": ["http://example.com/sub-02/ses-mri/anat/sub-02_ses-mri_run-2_echo-7_FLASH.nii.gz"], "size": 20000000, "directory": False, "id": "sub2_ses_mri_anat_flash2_echo7"},
+        ]
+    },
+    "sub2_ses_mri_dwi": {
+        "files": [
+            {"filename": "sub-02_ses-mri_dwi.bval", "urls": ["http://example.com/sub-02/ses-mri/dwi/sub-02_ses-mri_dwi.bval"], "size": 1000, "directory": False, "id": "sub2_ses_mri_dwi_bval"},
+            {"filename": "sub-02_ses-mri_dwi.bvec", "urls": ["http://example.com/sub-02/ses-mri/dwi/sub-02_ses-mri_dwi.bvec"], "size": 2000, "directory": False, "id": "sub2_ses_mri_dwi_bvec"},
+            {"filename": "sub-02_ses-mri_dwi.json", "urls": ["http://example.com/sub-02/ses-mri/dwi/sub-02_ses-mri_dwi.json"], "size": 800, "directory": False, "id": "sub2_ses_mri_dwi_json"},
+            {"filename": "sub-02_ses-mri_dwi.nii.gz", "urls": ["http://example.com/sub-02/ses-mri/dwi/sub-02_ses-mri_dwi.nii.gz"], "size": 30000000, "directory": False, "id": "sub2_ses_mri_dwi_nii"},
+        ]
+    },
+    "sub2_ses_mri_fmap": {
+        "files": [
+            {"filename": "sub-02_ses-mri_magnitude1.json", "urls": ["http://example.com/sub-02/ses-mri/fmap/sub-02_ses-mri_magnitude1.json"], "size": 400, "directory": False, "id": "sub2_ses_mri_fmap_mag1_json"},
+            {"filename": "sub-02_ses-mri_magnitude1.nii", "urls": ["http://example.com/sub-02/ses-mri/fmap/sub-02_ses-mri_magnitude1.nii"], "size": 10000000, "directory": False, "id": "sub2_ses_mri_fmap_mag1_nii"},
+            {"filename": "sub-02_ses-mri_magnitude2.json", "urls": ["http://example.com/sub-02/ses-mri/fmap/sub-02_ses-mri_magnitude2.json"], "size": 400, "directory": False, "id": "sub2_ses_mri_fmap_mag2_json"},
+            {"filename": "sub-02_ses-mri_magnitude2.nii", "urls": ["http://example.com/sub-02/ses-mri/fmap/sub-02_ses-mri_magnitude2.nii"], "size": 10000000, "directory": False, "id": "sub2_ses_mri_fmap_mag2_nii"},
+            {"filename": "sub-02_ses-mri_phasediff.json", "urls": ["http://example.com/sub-02/ses-mri/fmap/sub-02_ses-mri_phasediff.json"], "size": 400, "directory": False, "id": "sub2_ses_mri_fmap_phasediff_json"},
+            {"filename": "sub-02_ses-mri_phasediff.nii", "urls": ["http://example.com/sub-02/ses-mri/fmap/sub-02_ses-mri_phasediff.nii"], "size": 10000000, "directory": False, "id": "sub2_ses_mri_fmap_phasediff_nii"},
+        ]
+    },
+    "sub2_ses_mri_func": {
+        "files": [
+            {"filename": "sub-02_ses-mri_task-facerecognition_run-01_bold.json", "urls": ["http://example.com/sub-02/ses-mri/func/sub-02_ses-mri_task-facerecognition_run-01_bold.json"], "size": 800, "directory": False, "id": "sub2_ses_mri_func_run01_bold_json"},
+            {"filename": "sub-02_ses-mri_task-facerecognition_run-01_bold.nii.gz", "urls": ["http://example.com/sub-02/ses-mri/func/sub-02_ses-mri_task-facerecognition_run-01_bold.nii.gz"], "size": 40000000, "directory": False, "id": "sub2_ses_mri_func_run01_bold_nii"},
+            {"filename": "sub-02_ses-mri_task-facerecognition_run-01_events.tsv", "urls": ["http://example.com/sub-02/ses-mri/func/sub-02_ses-mri_task-facerecognition_run-01_events.tsv"], "size": 600, "directory": False, "id": "sub2_ses_mri_func_run01_events"},
+            {"filename": "sub-02_ses-mri_task-facerecognition_run-02_bold.json", "urls": ["http://example.com/sub-02/ses-mri/func/sub-02_ses-mri_task-facerecognition_run-02_bold.json"], "size": 800, "directory": False, "id": "sub2_ses_mri_func_run02_bold_json"},
+            {"filename": "sub-02_ses-mri_task-facerecognition_run-02_bold.nii.gz", "urls": ["http://example.com/sub-02/ses-mri/func/sub-02_ses-mri_task-facerecognition_run-02_bold.nii.gz"], "size": 40000000, "directory": False, "id": "sub2_ses_mri_func_run02_bold_nii"},
+            {"filename": "sub-02_ses-mri_task-facerecognition_run-02_events.tsv", "urls": ["http://example.com/sub-02/ses-mri/func/sub-02_ses-mri_task-facerecognition_run-02_events.tsv"], "size": 600, "directory": False, "id": "sub2_ses_mri_func_run02_events"},
+        ]
+    },
+    "sub-emptyroom": {
+        "files": [
+            {"filename": "ses-20090409", "urls": [], "size": 0, "directory": True, "id": "sub-emptyroom_ses-20090409"},
+        ]
+    },
+    "sub-emptyroom_ses-20090409": {
+        "files": [
+                {"filename": "sub-emptyroom_ses-20090409_scans.tsv", "urls": ["http://example.com/sub-emptyroom/ses-20090409/sub-emptyroom_ses-20090409_scans.tsv"], "size": 123, "directory": False, "id": "sub-emptyroom_ses-20090409_scans"},
+                {"filename": "meg", "urls": [], "size": 0, "directory": True, "id": "sub-emptyroom_ses-20090409_meg"},
+        ]
+    },
+    "sub-emptyroom_ses-20090409_meg": {
+        "files": [ 
+            { "filename": "sub-emptyroom_ses-20090409_task-noise_meg.fif", "urls": ["http://example.com/sub-emptyroom/ses-20090409/meg/sub-emptyroom_ses-20090409_task-noise_meg.fif"], "size": 456, "directory": False, "id": "sub-emptyroom_ses-20090409_task-noise_meg" },
+        ]
+    }
+}
+@pytest.mark.parametrize(
+    ("dataset", "include", "expected_files"),
+    [
+        # Test with a single file in root level
+        ("ds000117", 
+            ["*.tsv"], 
+            [
+                'dataset_description.json', 'participants.tsv', 'participants.json', 'README', 'CHANGES'
+            ]
+        ),
+        # Test sub-01
+        ("ds000117", 
+            ["sub-01"], 
+            [
+                'CHANGES', 'README', 'dataset_description.json', 'participants.json', 'participants.tsv', 'sub-01/ses-meg/sub-01_ses-meg_scans.tsv', 'sub-01/ses-meg/sub-01_ses-meg_task-facerecognition_channels.tsv', 'sub-01/ses-meg/sub-01_ses-meg_task-facerecognition_meg.json', 'sub-01/ses-meg/beh/sub-01_ses-meg_task-facerecognition_events.tsv', 'sub-01/ses-meg/meg/sub-01_ses-meg_coordsystem.json', 'sub-01/ses-meg/meg/sub-01_ses-meg_headshape.pos', 'sub-01/ses-meg/meg/sub-01_ses-meg_task-facerecognition_run-01_events.tsv', 'sub-01/ses-meg/meg/sub-01_ses-meg_task-facerecognition_run-01_meg.fif', 'sub-01/ses-meg/meg/sub-01_ses-meg_task-facerecognition_run-02_events.tsv', 'sub-01/ses-meg/meg/sub-01_ses-meg_task-facerecognition_run-02_meg.fif', 'sub-01/ses-mri/anat/sub-01_ses-mri_acq-mprage_T1w.json', 'sub-01/ses-mri/anat/sub-01_ses-mri_acq-mprage_T1w.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-1_echo-1_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-1_echo-2_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-1_echo-3_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-1_echo-4_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-1_echo-5_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-1_echo-6_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-1_echo-7_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-2_echo-1_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-2_echo-2_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-2_echo-3_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-2_echo-4_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-2_echo-5_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-2_echo-6_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-2_echo-7_FLASH.nii.gz', 'sub-01/ses-mri/dwi/sub-01_ses-mri_dwi.bval', 'sub-01/ses-mri/dwi/sub-01_ses-mri_dwi.bvec', 'sub-01/ses-mri/dwi/sub-01_ses-mri_dwi.json', 'sub-01/ses-mri/dwi/sub-01_ses-mri_dwi.nii.gz', 'sub-01/ses-mri/fmap/sub-01_ses-mri_magnitude1.json', 'sub-01/ses-mri/fmap/sub-01_ses-mri_magnitude1.nii', 'sub-01/ses-mri/fmap/sub-01_ses-mri_magnitude2.json', 'sub-01/ses-mri/fmap/sub-01_ses-mri_magnitude2.nii', 'sub-01/ses-mri/fmap/sub-01_ses-mri_phasediff.json', 'sub-01/ses-mri/fmap/sub-01_ses-mri_phasediff.nii', 'sub-01/ses-mri/func/sub-01_ses-mri_task-facerecognition_run-01_bold.json', 'sub-01/ses-mri/func/sub-01_ses-mri_task-facerecognition_run-01_bold.nii.gz', 'sub-01/ses-mri/func/sub-01_ses-mri_task-facerecognition_run-01_events.tsv', 'sub-01/ses-mri/func/sub-01_ses-mri_task-facerecognition_run-02_bold.json', 'sub-01/ses-mri/func/sub-01_ses-mri_task-facerecognition_run-02_bold.nii.gz', 'sub-01/ses-mri/func/sub-01_ses-mri_task-facerecognition_run-02_events.tsv'
+            ]
+        ),
+        # Test sub-01/
+        ("ds000117", 
+            ["sub-01/"], 
+            [
+                'CHANGES', 'README', 'dataset_description.json', 'participants.json', 'participants.tsv', 'sub-01/ses-meg/sub-01_ses-meg_scans.tsv', 'sub-01/ses-meg/sub-01_ses-meg_task-facerecognition_channels.tsv', 'sub-01/ses-meg/sub-01_ses-meg_task-facerecognition_meg.json', 'sub-01/ses-meg/beh/sub-01_ses-meg_task-facerecognition_events.tsv', 'sub-01/ses-meg/meg/sub-01_ses-meg_coordsystem.json', 'sub-01/ses-meg/meg/sub-01_ses-meg_headshape.pos', 'sub-01/ses-meg/meg/sub-01_ses-meg_task-facerecognition_run-01_events.tsv', 'sub-01/ses-meg/meg/sub-01_ses-meg_task-facerecognition_run-01_meg.fif', 'sub-01/ses-meg/meg/sub-01_ses-meg_task-facerecognition_run-02_events.tsv', 'sub-01/ses-meg/meg/sub-01_ses-meg_task-facerecognition_run-02_meg.fif', 'sub-01/ses-mri/anat/sub-01_ses-mri_acq-mprage_T1w.json', 'sub-01/ses-mri/anat/sub-01_ses-mri_acq-mprage_T1w.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-1_echo-1_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-1_echo-2_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-1_echo-3_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-1_echo-4_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-1_echo-5_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-1_echo-6_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-1_echo-7_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-2_echo-1_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-2_echo-2_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-2_echo-3_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-2_echo-4_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-2_echo-5_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-2_echo-6_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-2_echo-7_FLASH.nii.gz', 'sub-01/ses-mri/dwi/sub-01_ses-mri_dwi.bval', 'sub-01/ses-mri/dwi/sub-01_ses-mri_dwi.bvec', 'sub-01/ses-mri/dwi/sub-01_ses-mri_dwi.json', 'sub-01/ses-mri/dwi/sub-01_ses-mri_dwi.nii.gz', 'sub-01/ses-mri/fmap/sub-01_ses-mri_magnitude1.json', 'sub-01/ses-mri/fmap/sub-01_ses-mri_magnitude1.nii', 'sub-01/ses-mri/fmap/sub-01_ses-mri_magnitude2.json', 'sub-01/ses-mri/fmap/sub-01_ses-mri_magnitude2.nii', 'sub-01/ses-mri/fmap/sub-01_ses-mri_phasediff.json', 'sub-01/ses-mri/fmap/sub-01_ses-mri_phasediff.nii', 'sub-01/ses-mri/func/sub-01_ses-mri_task-facerecognition_run-01_bold.json', 'sub-01/ses-mri/func/sub-01_ses-mri_task-facerecognition_run-01_bold.nii.gz', 'sub-01/ses-mri/func/sub-01_ses-mri_task-facerecognition_run-01_events.tsv', 'sub-01/ses-mri/func/sub-01_ses-mri_task-facerecognition_run-02_bold.json', 'sub-01/ses-mri/func/sub-01_ses-mri_task-facerecognition_run-02_bold.nii.gz', 'sub-01/ses-mri/func/sub-01_ses-mri_task-facerecognition_run-02_events.tsv'
+            ]
+        ),
+        # Test sub-01/**
+        ("ds000117", 
+            ["sub-01/**"], 
+            [
+                'CHANGES', 'README', 'dataset_description.json', 'participants.json', 'participants.tsv', 'sub-01/ses-meg/sub-01_ses-meg_scans.tsv', 'sub-01/ses-meg/sub-01_ses-meg_task-facerecognition_channels.tsv', 'sub-01/ses-meg/sub-01_ses-meg_task-facerecognition_meg.json', 'sub-01/ses-meg/beh/sub-01_ses-meg_task-facerecognition_events.tsv', 'sub-01/ses-meg/meg/sub-01_ses-meg_coordsystem.json', 'sub-01/ses-meg/meg/sub-01_ses-meg_headshape.pos', 'sub-01/ses-meg/meg/sub-01_ses-meg_task-facerecognition_run-01_events.tsv', 'sub-01/ses-meg/meg/sub-01_ses-meg_task-facerecognition_run-01_meg.fif', 'sub-01/ses-meg/meg/sub-01_ses-meg_task-facerecognition_run-02_events.tsv', 'sub-01/ses-meg/meg/sub-01_ses-meg_task-facerecognition_run-02_meg.fif', 'sub-01/ses-mri/anat/sub-01_ses-mri_acq-mprage_T1w.json', 'sub-01/ses-mri/anat/sub-01_ses-mri_acq-mprage_T1w.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-1_echo-1_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-1_echo-2_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-1_echo-3_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-1_echo-4_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-1_echo-5_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-1_echo-6_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-1_echo-7_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-2_echo-1_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-2_echo-2_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-2_echo-3_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-2_echo-4_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-2_echo-5_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-2_echo-6_FLASH.nii.gz', 'sub-01/ses-mri/anat/sub-01_ses-mri_run-2_echo-7_FLASH.nii.gz', 'sub-01/ses-mri/dwi/sub-01_ses-mri_dwi.bval', 'sub-01/ses-mri/dwi/sub-01_ses-mri_dwi.bvec', 'sub-01/ses-mri/dwi/sub-01_ses-mri_dwi.json', 'sub-01/ses-mri/dwi/sub-01_ses-mri_dwi.nii.gz', 'sub-01/ses-mri/fmap/sub-01_ses-mri_magnitude1.json', 'sub-01/ses-mri/fmap/sub-01_ses-mri_magnitude1.nii', 'sub-01/ses-mri/fmap/sub-01_ses-mri_magnitude2.json', 'sub-01/ses-mri/fmap/sub-01_ses-mri_magnitude2.nii', 'sub-01/ses-mri/fmap/sub-01_ses-mri_phasediff.json', 'sub-01/ses-mri/fmap/sub-01_ses-mri_phasediff.nii', 'sub-01/ses-mri/func/sub-01_ses-mri_task-facerecognition_run-01_bold.json', 'sub-01/ses-mri/func/sub-01_ses-mri_task-facerecognition_run-01_bold.nii.gz', 'sub-01/ses-mri/func/sub-01_ses-mri_task-facerecognition_run-01_events.tsv', 'sub-01/ses-mri/func/sub-01_ses-mri_task-facerecognition_run-02_bold.json', 'sub-01/ses-mri/func/sub-01_ses-mri_task-facerecognition_run-02_bold.nii.gz', 'sub-01/ses-mri/func/sub-01_ses-mri_task-facerecognition_run-02_events.tsv'
+            ]
+        ),
+        # Test multiple include patterns
+        ("ds000117", 
+            [
+                'sub-01/ses-meg/meg/sub-01_ses-meg_task-facerecognition_run-01_*', 'sub-01/ses-meg/meg/sub-01_ses-meg_task-facerecognition_run-02_*', 'sub-01/ses-meg/meg/sub-01_ses-meg_headshape.pos', 'sub-01/ses-meg/*.tsv', 'sub-01/ses-meg/*.json', 'sub-emptyroom/ses-20090409', 'derivatives/meg_derivatives/ct_sparse.fif', 'derivatives/meg_derivatives/sss_cal.dat'
+            ],
+            [
+                'CHANGES', 'README', 'dataset_description.json', 'participants.json', 'participants.tsv', 'derivatives/meg_derivatives/ct_sparse.fif', 'derivatives/meg_derivatives/sss_cal.dat', 'sub-01/ses-meg/sub-01_ses-meg_scans.tsv', 'sub-01/ses-meg/sub-01_ses-meg_task-facerecognition_channels.tsv', 'sub-01/ses-meg/sub-01_ses-meg_task-facerecognition_meg.json', 'sub-01/ses-meg/beh/sub-01_ses-meg_task-facerecognition_events.tsv', 'sub-01/ses-meg/meg/sub-01_ses-meg_coordsystem.json', 'sub-01/ses-meg/meg/sub-01_ses-meg_headshape.pos', 'sub-01/ses-meg/meg/sub-01_ses-meg_task-facerecognition_run-01_events.tsv', 'sub-01/ses-meg/meg/sub-01_ses-meg_task-facerecognition_run-01_meg.fif', 'sub-01/ses-meg/meg/sub-01_ses-meg_task-facerecognition_run-02_events.tsv', 'sub-01/ses-meg/meg/sub-01_ses-meg_task-facerecognition_run-02_meg.fif', 'sub-emptyroom/ses-20090409/sub-emptyroom_ses-20090409_scans.tsv', 'sub-emptyroom/ses-20090409/meg/sub-emptyroom_ses-20090409_task-noise_meg.fif'
+            ]
+        ),
+    ],
+)
+def test_download_file_list_generation(dataset: str, include: list[str], expected_files: list[str]):
+    """Test that the download function generates the correct list of files without actually downloading.
+    
+    This test verifies the file filtering logic by mocking the metadata retrieval
+    and checking that the correct files are selected based on include/exclude patterns.
+    """
+    def mock_get_download_metadata(*args, **kwargs):
+        tree = kwargs.get('tree', 'null').strip('"').strip("'")
+        return copy.deepcopy(MOCK_METADATA[tree])
+    
+    def mock_get_local_tag(*args, **kwargs):
+        return None
+
+    async def _download_files_spy(*, files, **kwargs):
+        """Spy on _download_files to capture the call arguments"""
+        return None
+
+    with patch.object(_download, "_get_download_metadata", side_effect=mock_get_download_metadata) as mock_get_download_metadata, \
+         patch.object(_download, "_get_local_tag", side_effect=mock_get_local_tag) as mock_get_local_tag, \
+         patch.object(_download, "_download_files", side_effect=_download_files_spy) as _download_files_spy:
+            
+        # Run the function with an include pattern
+        _download.download(
+            dataset=dataset,
+            target_dir=Path("/tmp/test"),
+            include=include,
+        )
+        
+        files_arg = _download_files_spy.call_args[1]["files"]
+        files_arg = [file["filename"] for file in files_arg]        
+        assert len(files_arg) == len(expected_files), f"Expected {len(expected_files)} files, got {len(files_arg)}"
+        for file in files_arg:
+            assert file in expected_files, f"File {file} not found in expected files"
+
+
+@pytest.mark.parametrize(
+    ("dataset", "include", "expected_num_files"),
+    [
+        ("ds000117", ["*"], 2626),
+        ("ds000117", ["sub-01"], 76),
+        ("ds000117", ["sub-01/**/*.tsv"], 23),
+        ("ds000117", ["sub-01/**"], 76),
+        ("ds000117", 
+            [
+                'sub-01/ses-meg/meg/sub-01_ses-meg_task-facerecognition_run-01_*',
+                'sub-01/ses-meg/meg/sub-01_ses-meg_task-facerecognition_run-02_*',
+                'sub-01/ses-meg/meg/sub-01_ses-meg_headshape.pos',
+                'sub-01/ses-meg/*.tsv',
+                'sub-01/ses-meg/*.json',
+                'sub-emptyroom/ses-20090409',
+                'derivatives/meg_derivatives/ct_sparse.fif',
+                'derivatives/meg_derivatives/sss_cal.dat'
+            ],
+            23
+        ),
+        ("ds000117", ["**/ses-meg/**"], 517),
+    ]
+)
+def test_download_file_count(dataset: str, include: list[str], expected_num_files: int):
+    """Test that the download function generates the correct number of files without actually downloading.
+    
+    This test verifies the file filtering logic by mocking the metadata retrieval
+    and checking that the correct number of files are selected based on include/exclude patterns.
+    """
+    async def _download_files_spy(*, files, **kwargs):
+        """Spy on _download_files to capture the call arguments"""
+        return None
+            
+    with patch.object(_download, "_download_files", side_effect=_download_files_spy) as _download_files_spy:
+                
+        # Run the function with an include pattern
+        _download.download(
+            dataset=dataset,
+            target_dir=Path("/tmp/test"),
+            include=include,
+        )
+        
+        files_arg = _download_files_spy.call_args[1]["files"]
+        files_arg = [file["filename"] for file in files_arg]        
+        assert len(files_arg) == expected_num_files, f"Expected {expected_num_files} files, got {len(files_arg)}"
